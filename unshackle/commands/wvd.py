@@ -213,7 +213,7 @@ def new(
 
     name: The origin device name of the provided data. e.g. `Nexus 6P`. You do not need to
         specify the security level, that will be done automatically.
-    private_key: A PEM file of a Device's private key.
+    private_key: Device's RSA private key in PEM (PKCS#1 or PKCS#8) or DER format.
     client_id: A binary blob file which follows the Widevine ClientIdentification protobuf
         schema.
     file_hashes: A binary blob file with follows the Widevine FileHashes protobuf schema.
@@ -236,27 +236,49 @@ def new(
     # Read the private key
     private_key_data = private_key.read_bytes()
 
-    # Try to import the key - if it fails, try to add PEM headers
+    # Try to import the key - pywidevine supports PEM (PKCS#1/PKCS#8) and DER formats
     try:
         from Crypto.PublicKey import RSA
 
         # Test if the key can be imported
         RSA.import_key(private_key_data)
     except ValueError as e:
-        # If the key doesn't have PEM headers, try adding them
+        # If import failed and the key doesn't have PEM headers, it might be base64-encoded PEM without headers
         if b"-----BEGIN" not in private_key_data:
-            # Assume it's a raw base64-encoded key
-            private_key_data = (
-                b"-----BEGIN RSA PRIVATE KEY-----\n" + private_key_data + b"\n-----END RSA PRIVATE KEY-----"
-            )
+            import base64
+
+            # Check if it's base64-encoded (not binary DER)
             try:
-                RSA.import_key(private_key_data)
-            except ValueError:
-                # Try PKCS8 format
-                private_key_data = private_key.read_bytes()
-                private_key_data = b"-----BEGIN PRIVATE KEY-----\n" + private_key_data + b"\n-----END PRIVATE KEY-----"
+                decoded = base64.b64decode(private_key_data, validate=True)
+                # If successful, this might be base64-encoded DER or headerless PEM
+                # Try importing as DER first
+                try:
+                    RSA.import_key(decoded)
+                    private_key_data = decoded  # Use the decoded DER data
+                except ValueError:
+                    # Not DER, try adding PEM headers
+                    # First try PKCS#1 format
+                    private_key_data = (
+                        b"-----BEGIN RSA PRIVATE KEY-----\n" + private_key_data + b"\n-----END RSA PRIVATE KEY-----"
+                    )
+                    try:
+                        RSA.import_key(private_key_data)
+                    except ValueError:
+                        # Try PKCS#8 format
+                        private_key_data = private_key.read_bytes()
+                        private_key_data = (
+                            b"-----BEGIN PRIVATE KEY-----\n" + private_key_data + b"\n-----END PRIVATE KEY-----"
+                        )
+                        RSA.import_key(private_key_data)  # Let this raise if it still fails
+            except Exception:
+                # Not base64, might be binary DER format - the original error is more helpful
+                raise click.UsageError(
+                    f"private_key: {e}. The private key must be in PEM (PKCS#1 or PKCS#8) or DER format.", ctx
+                )
         else:
-            raise click.UsageError(f"private_key: {e}. The private key must be in PEM format (PKCS#1 or PKCS#8).", ctx)
+            raise click.UsageError(
+                f"private_key: {e}. The private key must be in PEM (PKCS#1 or PKCS#8) or DER format.", ctx
+            )
 
     device = Device(
         type_=DeviceTypes[type_.upper()],
