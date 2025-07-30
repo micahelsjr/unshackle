@@ -233,11 +233,36 @@ def new(
     if file_hashes and not file_hashes.is_file():
         raise click.UsageError("file_hashes: Not a path to a file, or it doesn't exist.", ctx)
 
+    # Read the private key
+    private_key_data = private_key.read_bytes()
+
+    # Try to import the key - if it fails, try to add PEM headers
+    try:
+        from Crypto.PublicKey import RSA
+
+        # Test if the key can be imported
+        RSA.import_key(private_key_data)
+    except ValueError as e:
+        # If the key doesn't have PEM headers, try adding them
+        if b"-----BEGIN" not in private_key_data:
+            # Assume it's a raw base64-encoded key
+            private_key_data = (
+                b"-----BEGIN RSA PRIVATE KEY-----\n" + private_key_data + b"\n-----END RSA PRIVATE KEY-----"
+            )
+            try:
+                RSA.import_key(private_key_data)
+            except ValueError:
+                # Try PKCS8 format
+                private_key_data = private_key.read_bytes()
+                private_key_data = b"-----BEGIN PRIVATE KEY-----\n" + private_key_data + b"\n-----END PRIVATE KEY-----"
+        else:
+            raise click.UsageError(f"private_key: {e}. The private key must be in PEM format (PKCS#1 or PKCS#8).", ctx)
+
     device = Device(
         type_=DeviceTypes[type_.upper()],
         security_level=level,
         flags=None,
-        private_key=private_key.read_bytes(),
+        private_key=private_key_data,
         client_id=client_id.read_bytes(),
     )
 
@@ -270,3 +295,32 @@ def new(
         log.info(str(file_hashes))
     else:
         log.info("None")
+
+
+@wvd.command()
+@click.argument("output", type=Path)
+@click.option("--key-size", type=click.IntRange(2048, 4096), default=2048, help="RSA key size in bits")
+def generate_key(output: Path, key_size: int) -> None:
+    """
+    Generate a new RSA private key in PEM format suitable for WVD creation.
+
+    The generated key will be in PKCS#1 PEM format which is compatible
+    with the 'wvd new' command.
+    """
+    from Crypto.PublicKey import RSA
+
+    log = logging.getLogger("wvd")
+
+    # Generate RSA key
+    key = RSA.generate(key_size)
+
+    # Export in PEM format
+    private_key_pem = key.export_key(format="PEM")
+
+    # Write to file
+    output.write_bytes(private_key_pem)
+
+    log.info(f"Generated {key_size}-bit RSA private key")
+    log.info(f"Saved to: {output.absolute()}")
+    log.info("Key format: PKCS#1 PEM")
+    log.info(f"You can use this key with: unshackle wvd new <name> {output} <client_id>")
